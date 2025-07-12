@@ -8,8 +8,6 @@
     # 没了
 
 import torch
-import esm
-
 import os
 import pandas as pd
 import numpy as np
