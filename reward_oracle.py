@@ -7,7 +7,8 @@
     # 整个亲和力测试部分，_calculate_affinity_pyrosetta(self, binder_pdb_path: str):，需要pyrosetta计算的ΔΔG，以及根据这玩意算出来的loss function
     # 没了
 
-
+import torch
+import esm
 
 import os
 import pandas as pd
@@ -51,6 +52,44 @@ class RewardOracle:
         self.wet_lab_data = self._load_and_process_wet_lab_data(WET_LAB_DATA_PATH)
         print(f"已从湿实验数据中加载 {len(self.wet_lab_data)} 条记录。")
 
+        # ... (PyRosetta 和湿实验数据的代码保持不变) ...
+        
+        # --- 新增: 加载ESMFold模型 (一次性加载) ---
+        print("正在加载ESMFold模型到GPU...")
+        try:
+            # 加载ESMFold v1预训练模型
+            self.esmfold_model = esm.pretrained.esmfold_v1()
+            # 设置为评估模式，这会禁用Dropout等训练特有的层
+            self.esmfold_model = self.esmfold_model.eval().cuda()
+            print("ESMFold模型加载成功。")
+        except Exception as e:
+            raise RuntimeError(f"致命错误: 无法加载ESMFold模型，请检查fair-esm安装和CUDA环境: {e}")
+
+        # ... (其余的 __init__ 代码) ...
+
+
+    
+    def _parse_plddt_from_pdb(self, pdb_string: str) -> float:
+        """
+        一个辅助函数，用于从PDB文件内容的字符串中解析出pLDDT分数。
+        pLDDT分数存储在B-factor列中。
+        """
+        plddt_scores = []
+        for line in pdb_string.split('\n'):
+            if line.startswith('ATOM'):
+                try:
+                    # B-factor列是第11个字段，索引为10，但通常按固定宽度列解析更稳妥
+                    # 字符位置 61-66 是B-factor
+                    b_factor_str = line[60:66].strip()
+                    plddt_scores.append(float(b_factor_str))
+                except (ValueError, IndexError):
+                    # 忽略无法解析的行
+                    continue
+        
+        if not plddt_scores:
+            return 0.0
+        return np.mean(plddt_scores)
+
     def _load_and_process_wet_lab_data(self, path):
         """
         [统一湿实验数据与干实验性质预测 @Terry]
@@ -73,37 +112,35 @@ class RewardOracle:
 
     def _predict_structure_esmfold(self, sequence: str, sequence_id: str):
         """
-        [部署: 结构预测]
+        [已填充: 结构预测]
         调用ESMFold来预测结构，并返回PDB文件路径和平均pLDDT分数。
         """
-        output_pdb_path = os.path.join(OUTPUT_DIR, f"{sequence_id}.pdb")
+        output_pdb_path = os.path.join(OUTPUT_DIR, f"{sequence_id}_pred.pdb")
         
-        # [实现细节] 这是你调用ESMFold API或脚本的地方。
-        # ------------ START OF 伪代码 ------------
+        print(f"信息: 正在为序列 {sequence_id} 运行ESMFold预测...")
         try:
-            # model = esm.pretrained.esmfold_v1()
-            # model = model.eval().cuda()
-            # with torch.no_grad():
-            #     output = model.infer_pdb(sequence)
-            #
-            # with open(output_pdb_path, "w") as f:
-            #     f.write(output)
-            #
-            # plddt_scores = model.get_plDDT(output) # 虚构的函数，用于获取pLDDT分数
-            # mean_plddt = np.mean(plddt_scores)
+            # 使用在__init__中加载的模型进行预测
+            # 我们不需要计算梯度，所以使用torch.no_grad()来节省内存
+            with torch.no_grad():
+                pdb_output_string = self.esmfold_model.infer_pdb(sequence)
+
+            # 将预测结果（一个字符串）写入PDB文件
+            with open(output_pdb_path, "w") as f:
+                f.write(pdb_output_string)
             
-            # 在这个模板中，我们先模拟输出
-            print(f"模拟: 对序列 {sequence_id} 进行ESMFold预测")
-            mean_plddt = np.random.uniform(0.6, 0.95) # 模拟一个pLDDT分数
-            with open(output_pdb_path, "w") as f: # 创建一个虚拟的PDB文件
-                 f.write("ATOM      1  N   MET A   1      27.270 -20.730  -0.530  1.00  0.00           N\n")
+            # 从PDB字符串中解析pLDDT分数
+            # 除以100，因为ESMFold的pLDDT分数范围是0-100，而我们通常在0-1的尺度上讨论
+            mean_plddt = self._parse_plddt_from_pdb(pdb_output_string) / 100.0
+
+            print(f"信息: 序列 {sequence_id} 预测完成。PDB保存在 {output_pdb_path}。平均pLDDT: {mean_plddt:.3f}")
             
             return output_pdb_path, mean_plddt
+            
         except Exception as e:
             print(f"错误: 对序列 {sequence_id} 的ESMFold预测失败: {e}")
-            return None, 0.0 # 返回失败状态
-        # ------------- END OF 伪代码 -------------
+            return None, 0.0 # 返回一个清晰的失败信号
 
+    
     def _calculate_affinity_pyrosetta(self, binder_pdb_path: str):
         """
         [部署: 亲和力评估] & [Loss Function设计: 引入∆∆G]
