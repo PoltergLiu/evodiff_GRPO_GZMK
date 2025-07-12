@@ -1,93 +1,186 @@
 # reward_oracle.py
+# 在 _predict_structure_esmfold 和 _calculate_affinity_pyrosetta 这两个核心函数中，我使用了伪代码和模拟输出来展示逻辑！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
+# 需要做的如下：
+    # 将目标PDB加载成一个PyRosetta的 'pose' (姿态) 对象。
+    # 加载湿实验数据，并将其转换为与奖励分数兼容的格式。
+    # 调用ESMFold来预测结构，并返回PDB文件路径和平均pLDDT分数。
+    # 整个亲和力测试部分，_calculate_affinity_pyrosetta(self, binder_pdb_path: str):，需要pyrosetta计算的ΔΔG，以及根据这玩意算出来的loss function
+    # 没了
+
+
+
+import os
 import pandas as pd
+import numpy as np
+
+# [API/库导入] - 你需要在这里导入你将使用的特定库
+import esm
 import pyrosetta
-from config import *
+from pyrosetta import rosetta
+
+from config import * # 从我们的配置文件中导入所有路径和权重
 
 class RewardOracle:
     def __init__(self):
-        # 初始化PyRosetta
-        # [实现细节] 根据你的系统配置PyRosetta初始化参数
-        pyrosetta.init(f"-j {PYROSETTA_MAX_CPUS}")
-
-        # 加载目标结构
-        self.target_pose = pyrosetta.pose_from_pdb(GZMK_TARGET_PDB_PATH)
-
-        # 加载并处理湿实验数据 (@Terry)
-        self.wet_lab_df = self.load_and_process_wet_lab_data(WET_LAB_DATA_PATH)
-
-    def load_and_process_wet_lab_data(self, path):
         """
-        统一湿实验数据与干实验性质预测 (@Terry)
-        - 读取湿实验数据
-        - 将实验结果 (如Kd, IC50) 映射到一个与计算指标可比的数值尺度上
+        初始化奖励预言机。
+        这包括一次性的设置任务，如加载目标结构和实验数据。
         """
-        df = pd.read_csv(path) # 假设CSV有 'sequence' 和 'Kd_nM' 两列
-        # [实现细节] 设计一个映射函数
-        # 例如，将Kd值转换为一个奖励分数，Kd越小分数越高
-        # log-scale mapping: score = -log10(Kd_nM)
-        df['wet_lab_score'] = -np.log10(df['Kd_nM'])
+        print("正在初始化奖励预言机(RewardOracle)...")
+        
+        # --- 1. 初始化 PyRosetta ---
+        # [实现细节] 这个命令初始化PyRosetta。其标志可以自定义。
+        # '-j' 指定用于并行任务的CPU数量。
+        # '-ignore_unrecognized_res' 有助于避免处理非标准残基时程序崩溃。
+        try:
+            pyrosetta.init(f"-j {PYROSETTA_MAX_CPUS} -ignore_unrecognized_res")
+            print("PyRosetta 初始化成功 (模拟状态)。")
+        except Exception as e:
+            print(f"严重错误: PyRosetta 初始化失败: {e}")
+
+        # --- 2. 加载 GZMK 目标结构 ---
+        # [实现细节] 将目标PDB加载成一个PyRosetta的 'pose' (姿态) 对象。
+        # 这个pose对象将用于每一次的结合计算。
+        if not os.path.exists(GZMK_TARGET_PDB_PATH):
+            raise FileNotFoundError(f"在以下路径未找到目标PDB文件: {GZMK_TARGET_PDB_PATH}")
+        # self.target_pose = pyrosetta.pose_from_pdb(GZMK_TARGET_PDB_PATH)
+        self.target_pose_placeholder = "GZMK_POSE_LOADED" # 使用占位符表示已加载
+        print(f"已从 {GZMK_TARGET_PDB_PATH} 加载目标GZMK结构。")
+
+        # --- 3. 加载并处理湿实验数据 (@Terry) ---
+        self.wet_lab_data = self._load_and_process_wet_lab_data(WET_LAB_DATA_PATH)
+        print(f"已从湿实验数据中加载 {len(self.wet_lab_data)} 条记录。")
+
+    def _load_and_process_wet_lab_data(self, path):
+        """
+        [统一湿实验数据与干实验性质预测 @Terry]
+        加载实验数据，并将其转换为与奖励分数兼容的格式。
+        """
+        if not os.path.exists(path):
+            print(f"警告: 在 {path} 未找到湿实验数据。将在没有湿实验数据的情况下继续。")
+            return pd.DataFrame() # 如果文件不存在，返回空的DataFrame
+
+        df = pd.read_csv(path) # 假设CSV文件包含 'sequence' 和 'Kd_nM' 两列
+        
+        # --- 数据统一化逻辑 ---
+        # 目标: 将一个“越低越好”的指标 (如Kd) 转换为一个“越高越好”的奖励分数。
+        # 一个常用的方法是对数尺度转换。
+        # 我们添加一个很小的epsilon以避免计算log(0)。
+        df['wet_lab_reward_score'] = -np.log10(df['Kd_nM'] + 1e-9)
+        
+        # 将序列设置成索引，以实现超快速查找 (平均时间复杂度O(1))
         return df.set_index('sequence')
 
-    def predict_structure(self, sequence):
-        """使用ESMFold或OmegaFold预测结构，并返回pLDDT"""
-        # [实现细节] 调用你的结构预测模型API
-        # 这里是伪代码
-        # pdb_string, plddt_scores = esmfold_api.predict(sequence)
-        # mean_plddt = np.mean(plddt_scores)
-        # temp_pdb_file = f"{OUTPUT_DIR}/{sequence[:10]}.pdb"
-        # with open(temp_pdb_file, "w") as f:
-        #     f.write(pdb_string)
-        # return temp_pdb_file, mean_plddt
+    def _predict_structure_esmfold(self, sequence: str, sequence_id: str):
+        """
+        [部署: 结构预测]
+        调用ESMFold来预测结构，并返回PDB文件路径和平均pLDDT分数。
+        """
+        output_pdb_path = os.path.join(OUTPUT_DIR, f"{sequence_id}.pdb")
+        
+        # [实现细节] 这是你调用ESMFold API或脚本的地方。
+        # ------------ START OF 伪代码 ------------
+        try:
+            # model = esm.pretrained.esmfold_v1()
+            # model = model.eval().cuda()
+            # with torch.no_grad():
+            #     output = model.infer_pdb(sequence)
+            #
+            # with open(output_pdb_path, "w") as f:
+            #     f.write(output)
+            #
+            # plddt_scores = model.get_plDDT(output) # 虚构的函数，用于获取pLDDT分数
+            # mean_plddt = np.mean(plddt_scores)
+            
+            # 在这个模板中，我们先模拟输出
+            print(f"模拟: 对序列 {sequence_id} 进行ESMFold预测")
+            mean_plddt = np.random.uniform(0.6, 0.95) # 模拟一个pLDDT分数
+            with open(output_pdb_path, "w") as f: # 创建一个虚拟的PDB文件
+                 f.write("ATOM      1  N   MET A   1      27.270 -20.730  -0.530  1.00  0.00           N\n")
+            
+            return output_pdb_path, mean_plddt
+        except Exception as e:
+            print(f"错误: 对序列 {sequence_id} 的ESMFold预测失败: {e}")
+            return None, 0.0 # 返回失败状态
+        # ------------- END OF 伪代码 -------------
 
-        # 模拟返回
-        print(f"INFO: Simulating structure prediction for {sequence[:10]}...")
-        return "path/to/simulated.pdb", 0.85
+    def _calculate_affinity_pyrosetta(self, binder_pdb_path: str):
+        """
+        [部署: 亲和力评估] & [Loss Function设计: 引入∆∆G]
+        使用PyRosetta计算一个结合亲和力分数 (作为∆∆G的代理)。
+        """
+        # [实现细节] 这是一个高度简化的PyRosetta工作流程。
+        # 一个真实的工作流会包含结构松弛、对接和一个完整的计算协议。
+        # ------------ START OF 伪代码 ------------
+        try:
+            # 1. 加载由ESMFold预测的结合剂结构
+            # binder_pose = pyrosetta.pose_from_pdb(binder_pdb_path)
+            
+            # 2. (复杂步骤) 将结合剂对接到目标pose上。
+            # 这可以通过PatchDock服务器API后接RosettaDock等协议完成。
+            # 为简单起见，我们假设它们已经形成了一个复合物。
+            
+            # 3. 使用InterfaceAnalyzer来获取结合能(dG)
+            # 这是一个结合亲和力的代理指标。dG越负越好。
+            # interface_analyzer = rosetta.protocols.analysis.InterfaceAnalyzer(complex_pose)
+            # interface_analyzer.apply(complex_pose)
+            # dG = interface_analyzer.get_interface_dG()
+            
+            # 在这个模板中，我们模拟输出
+            print(f"模拟: PyRosetta亲和力计算...")
+            dG = -np.random.uniform(5, 25) # 模拟一个负的dG值
 
-    def calculate_ddg_pyrosetta(self, binder_pdb_path):
-        """引入∆∆G等来自于PyRosetta等亲和力指标"""
-        # [实现细节] 实现PyRosetta的∆∆G计算流程
-        # 这是一个高度简化的流程
-        # 1. 加载binder和target，组合成复合物
-        # binder_pose = pyrosetta.pose_from_pdb(binder_pdb_path)
-        # complex_pose = self.form_complex(self.target_pose, binder_pose)
-        # 2. 使用Rosetta的ddG协议
-        # ddg_filter = pyrosetta.rosetta.protocols.analysis.InterfaceAnalyzer(complex_pose)
-        # ddg_value = ddg_filter.get_interface_dG() # dG是结合自由能，其变化量∆∆G更有意义
-        # 为了简化，我们直接使用dG的负值作为亲和力分数
-        # return -ddg_value
+            # 我们需要的是奖励分数，所以越高越好。返回dG的负值。
+            return -dG 
+        except Exception as e:
+            print(f"错误: 对 {binder_pdb_path} 的PyRosetta计算失败: {e}")
+            return -100.0 # 返回一个巨大的惩罚
+        # ------------- END OF 伪代码 -------------
 
-        # 模拟返回
-        print(f"INFO: Simulating PyRosetta ddG calculation...")
-        return 15.0 # 返回一个模拟的亲和力分数
-
-    def compute_reward(self, sequence):
-        """计算单个序列的最终奖励"""
-        # 1. 检查湿实验数据库 (@Terry)
-        if sequence in self.wet_lab_df.index:
-            print(f"INFO: Found sequence {sequence[:10]} in wet lab data!")
-            wet_score = self.wet_lab_df.loc[sequence]['wet_lab_score']
-            # 对已验证的序列给予高额固定奖励，或使用其映射分数
+    def compute_reward(self, sequence: str) -> float:
+        """
+        主要的公共方法。为单个序列计算最终的奖励分数。
+        """
+        sequence_id = sequence[:10] # 使用前10个残基作为日志记录的唯一ID
+        
+        # --- 1. 首先检查湿实验数据库 (@Terry) ---
+        if not self.wet_lab_data.empty and sequence in self.wet_lab_data.index:
+            wet_score = self.wet_lab_data.loc[sequence]['wet_lab_reward_score']
+            print(f"信息: 在湿实验数据中找到序列 {sequence_id}。分数为: {wet_score:.2f} + 额外奖励")
+            # 对匹配已知有效结合剂的序列给予显著的额外奖励
             return wet_score + REWARD_WET_LAB_BONUS
 
-        # 2. 如果不在湿实验库中，进行干实验预测
+        # --- 2. 如果不在数据库中，运行干实验预测流程 ---
         try:
             # 2a. 结构预测
-            binder_pdb_path, mean_plddt = self.predict_structure(sequence)
+            binder_pdb_path, mean_plddt = self._predict_structure_esmfold(sequence, sequence_id)
+            if binder_pdb_path is None:
+                return -10.0 # 惩罚结构预测失败的序列
 
-            # 2b. 亲和力评估
-            ddg_score = self.calculate_ddg_pyrosetta(binder_pdb_path)
+            # [Loss Function设计: 引入蛋白质性质指标 (pLDDT)]
+            # 将pLDDT既作为直接的奖励组件，也作为置信度过滤器。
+            plddt_reward = mean_plddt
 
-            # 2c. 引入蛋白质性质指标 (如pLDDT)
-            # 对低质量结构进行惩罚
-            plddt_score = mean_plddt
+            # 2b. 亲和力计算
+            affinity_reward = self._calculate_affinity_pyrosetta(binder_pdb_path)
+
+            # --- 置信度加权 ---
+            # 如果pLDDT分数很低，说明结构不可靠，那么亲和力计算也可能没有意义。
+            # 我们应该降低它的权重。
             if mean_plddt < 0.7:
-                ddg_score *= 0.5 # 结构不可信，亲和力打折扣
+                print(f"警告: 序列 {sequence_id} 的pLDDT置信度低 ({mean_plddt:.2f})。将惩罚其亲和力分数。")
+                affinity_reward *= 0.1 # 如果结构很差，亲和力分数将大打折扣
 
-            # 3. 组合成最终奖励
-            reward = (REWARD_W_DDG * ddg_score) + (REWARD_W_PLDDT * plddt_score)
-            return reward
+            # --- 3. 最终的组合奖励 ---
+            # 所有组件的加权总和。权重从config.py中导入。
+            final_reward = (
+                REWARD_W_DDG * affinity_reward +
+                REWARD_W_PLDDT * plddt_reward
+            )
+            
+            print(f"信息: 序列 {sequence_id} 的干实验奖励: 亲和力={affinity_reward:.2f}, pLDDT={plddt_reward:.2f} -> 最终奖励={final_reward:.2f}")
+            return final_reward
 
         except Exception as e:
-            print(f"ERROR: Reward calculation failed for sequence {sequence[:10]}: {e}")
-            return -10.0 # 对计算失败的序列给予极低的奖励
-
+            print(f"致命错误: 在为序列 {sequence_id} 计算奖励时发生未处理的错误: {e}")
+            return -20.0 # 对任何意外崩溃给予巨大的惩罚
