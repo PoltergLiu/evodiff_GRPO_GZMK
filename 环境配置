@@ -1,0 +1,5 @@
+# 安装支持CUDA的PyTorch (如果尚未安装)
+# 访问 <https://pytorch.org/get-started/locally/> 选择你的CUDA版本来获取正确的命令
+
+# 安装fair-esm库
+pip install fair-esm[esmfold]
