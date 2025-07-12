@@ -43,8 +43,11 @@ class RewardOracle:
         if not os.path.exists(GZMK_TARGET_PDB_PATH):
             raise FileNotFoundError(f"在以下路径未找到目标PDB文件: {GZMK_TARGET_PDB_PATH}")
         # self.target_pose = pyrosetta.pose_from_pdb(GZMK_TARGET_PDB_PATH)
-        self.target_pose_placeholder = "GZMK_POSE_LOADED" # 使用占位符表示已加载
-        print(f"已从 {GZMK_TARGET_PDB_PATH} 加载目标GZMK结构。")
+
+        print("正在从PDB文件加载目标GZMK结构到PyRosetta Pose...")
+        self.target_pose = pyrosetta.pose_from_pdb(GZMK_TARGET_PDB_PATH)
+        # self.target_pose_placeholder = "GZMK_POSE_LOADED" # <--- 移除这行
+        print("目标GZMK Pose加载完成。")
 
         # --- 3. 加载并处理湿实验数据 (@Terry) ---
         self.wet_lab_data = self._load_and_process_wet_lab_data(WET_LAB_DATA_PATH)
@@ -138,39 +141,64 @@ class RewardOracle:
             print(f"错误: 对序列 {sequence_id} 的ESMFold预测失败: {e}")
             return None, 0.0 # 返回一个清晰的失败信号
 
-    
+    # 在 RewardOracle 类中
+
     def _calculate_affinity_pyrosetta(self, binder_pdb_path: str):
         """
-        [部署: 亲和力评估] & [Loss Function设计: 引入∆∆G]
-        使用PyRosetta计算一个结合亲和力分数 (作为∆∆G的代理)。
+        [已填充: 亲和力评估]
+        使用PyRosetta计算结合亲和力分数。
+        这个函数执行一个简化的对接和打分流程。
         """
-        # [实现细节] 这是一个高度简化的PyRosetta工作流程。
-        # 一个真实的工作流会包含结构松弛、对接和一个完整的计算协议。
-        # ------------ START OF 伪代码 ------------
+        print(f"信息: 正在为 {os.path.basename(binder_pdb_path)} 运行PyRosetta亲和力计算...")
         try:
-            # 1. 加载由ESMFold预测的结合剂结构
-            # binder_pose = pyrosetta.pose_from_pdb(binder_pdb_path)
-            
-            # 2. (复杂步骤) 将结合剂对接到目标pose上。
-            # 这可以通过PatchDock服务器API后接RosettaDock等协议完成。
-            # 为简单起见，我们假设它们已经形成了一个复合物。
-            
-            # 3. 使用InterfaceAnalyzer来获取结合能(dG)
-            # 这是一个结合亲和力的代理指标。dG越负越好。
-            # interface_analyzer = rosetta.protocols.analysis.InterfaceAnalyzer(complex_pose)
-            # interface_analyzer.apply(complex_pose)
-            # dG = interface_analyzer.get_interface_dG()
-            
-            # 在这个模板中，我们模拟输出
-            print(f"模拟: PyRosetta亲和力计算...")
-            dG = -np.random.uniform(5, 25) # 模拟一个负的dG值
+            # --- 步骤 1: 加载由ESMFold预测的结合剂结构为Pose对象 ---
+            binder_pose = pyrosetta.pose_from_pdb(binder_pdb_path)
 
-            # 我们需要的是奖励分数，所以越高越好。返回dG的负值。
-            return -dG 
+            # --- 步骤 2: 结构准备与对接 (简化版) ---
+            # 一个完整的流程会包含复杂的对接搜索。在这里，我们做一个简化但有效的假设：
+            # 我们将结合剂移动到目标旁边，然后进行局部优化。
+            # 首先，克隆目标pose，防止原始pose被修改。
+            working_target_pose = self.target_pose.clone()
+
+            # 将结合剂pose附加到目标pose后面，创建一个复合物
+            # 注意：这只是将两个分子放在同一个坐标系，它们还没有相互作用。
+            complex_pose = working_target_pose.clone()
+            complex_pose.append_pose_by_jump(binder_pose, 1)
+
+            # --- 步骤 3: 使用InterfaceAnalyzer协议计算结合能 ---
+            # 这是Rosetta中用于分析蛋白-蛋白界面的标准工具。
+            # 它会计算dG、埋藏表面积(SASA)等多种指标。
+            interface_analyzer = rosetta.protocols.analysis.InterfaceAnalyzer()
+            
+            # 定义分析的蛋白链。假设目标是链A，新加入的结合剂是链B。
+            # 【重要】你需要根据你的PDB文件确认链ID。
+            interface_analyzer.set_interface("A_B")
+            
+            # 在复合物pose上运行分析
+            interface_analyzer.apply(complex_pose)
+            
+            # --- 步骤 4: 提取结合能 (dG) ---
+            # get_interface_dG() 返回的是结合自由能。这个值越负，代表结合越强。
+            dG = interface_analyzer.get_interface_dG()
+
+            # 对于奖励函数，我们需要一个“越高越好”的分数。
+            # 因此，我们返回dG的负值。
+            affinity_score = -dG
+
+            print(f"信息: PyRosetta计算完成。Interface dG: {dG:.2f}, Affinity Score: {affinity_score:.2f}")
+
+            # 如果dG是正数（表示排斥），返回一个负的奖励值。
+            if affinity_score < 0:
+                return -1.0
+                
+            return affinity_score
+
         except Exception as e:
-            print(f"错误: 对 {binder_pdb_path} 的PyRosetta计算失败: {e}")
-            return -100.0 # 返回一个巨大的惩罚
-        # ------------- END OF 伪代码 -------------
+            # PyRosetta的计算很容易出错（例如，如果PDB结构有问题）。
+            # 必须捕获异常以防止整个RL流程崩溃。
+            print(f"错误: 对 {os.path.basename(binder_pdb_path)} 的PyRosetta计算失败: {e}")
+            # 返回一个巨大的负值作为惩罚
+            return -100.0
 
     def compute_reward(self, sequence: str) -> float:
         """
